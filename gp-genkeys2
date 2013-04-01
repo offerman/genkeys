@@ -1,0 +1,202 @@
+#!/bin/bash
+zonedir="/var/named/chroot/var/named"
+zonefiles_prefix="db."
+zonefiles_suffix=""
+keydir="/etc/bind/keys"
+keygen_executable="/usr/sbin/dnssec-keygen"
+keygen_command="$keygen_executable -n ZONE"
+options_zsk=""
+options_ksk="-f KSK"
+algorithm="RSASHA256"
+keysize_zsk="1024"
+keysize_ksk="2048"
+random_generator="/dev/random"
+
+usage() {
+  cat << EOF
+Usage: $0 [-k] [-a algorithm] [-b keysize] [-r randomdev] [-d] [-h]
+           [-K[=directory]] [-Z[=directory]] [-p prefix] [-s suffix]
+           [-P date/offset] [-A date/offset] [-I date/offset] [-D date/offset]
+           [-z | zone ...]
+generates ZSK or KSK key pairs for BIND named
+-k              generates KSK key pairs instead of ZSK (default)
+-a algorithm    cryptographic algorithm to be used;
+                valid arguments are: RSASHA1, RSASHA256 (default), and DSA
+-b keysize      number of bits in the key
+                (defaults: 2048 for KSK, 1024 for ZSK);
+                valid arguments are: 512, 1024, and 2048 (only for RSA)
+-r randomdev    source of the randomness (default: /dev/random)
+-K[=directory]  directory for reading/writing keys (default: /etc/bind/keys);
+                -K option without argument uses current working directory
+-z              generates key pairs for all zone files,
+                ignoring zones given as operands
+-Z[=directory]  directory for reading zone files
+                (default: /var/named/chroot/var/named);
+                -Z option without argument uses current working directory
+-p prefix       prefix of the zone files (default: db.*)
+-s suffix       suffix of the zone files (default: empty)
+-P date/offset  when a key is to be published (default: now),
+                included in the zone but not used to sign
+-A date/offset  when a key is to be activated (default: now),
+                included in the zone and used to sign
+-I date/offset  when a key is to be retired,
+                included in the zone but no longer used to sign
+-D date/offset  when a key is to be retired,
+                no longer included in the zone
+-d              dry-run, only showing dnssec-keygen commands without executing
+-h              prints help
+zone            zone the key pair is generated for, e.g. example.com
+See man dnssec-keygen for all date/offset specifications
+EOF
+  return
+  }
+
+test_option_timing_argument() {
+  [[ $1 =~ ^([[:digit:]]{8}|[[:digit:]]{14}|[+-][[:digit:]]+(|y|mo|w|d|h|mi))$ ]]
+  return
+  }
+
+# process options
+option_ksk=''
+option_keysize=''
+option_zonefiles=''
+option_dryrun=''
+argument_zone=''
+while getopts ':ka:b:r:K:zZ:p:s:P:A:I:D:dh' option; do
+  case $option in
+    k) option_ksk=1;;
+    a) if [[ ! $OPTARG =~ ^(RSASHA1|RSASHA256|DSA)$ ]]; then
+         echo "Invalid argument: $OPTARG" >&2
+         usage; exit 1
+         fi
+       algorithm="$OPTARG";;
+    b) if [[ ! $OPTARG =~ ^(512|1024|2048)$ ]]; then
+         echo "Invalid argument: $OPTARG" >&2
+         usage; exit 1
+         fi
+       option_keysize="$OPTARG";;
+    r) random_generator="$OPTARG";;
+    K) if eval [[ "$"$((OPTIND-1))"" == "$OPTARG" ]];then
+         $((--OPTIND)) 2>/dev/null  # not an argument; move back $OPTIND
+         keydir=".";
+       elif [[ $OPTARG =~ ^= ]]; then
+         keydir="${OPTARG:1}";
+       else
+         echo "Invalid argument specification: $OPTARG" >&2
+         usage; exit 1
+       fi;;
+    z) option_zonefiles=1;;
+    Z) if eval [[ "$"$((OPTIND-1))"" == "$OPTARG" ]];then
+         $((--OPTIND)) 2>/dev/null  # not an argument; move back $OPTIND
+         zonedir=".";
+       elif [[ $OPTARG =~ ^= ]]; then
+         zonedir="${OPTARG:1}";
+       else
+         echo "Invalid argument specification: $OPTARG" >&2
+         usage; exit 1
+       fi;;
+    p) zonefiles_prefix="$OPTARG";;
+    s) zonefiles_suffix="$OPTARG";;
+    P) if ! test_option_timing_argument $OPTARG; then
+         echo "Invalid argument: $OPTARG" >&2
+         usage; exit 1
+         fi
+       keygen_command+=" -P $OPTARG";;
+    A) if ! test_option_timing_argument $OPTARG; then
+         echo "Invalid argument: $OPTARG" >&2
+         usage; exit 1
+         fi
+       keygen_command+=" -A $OPTARG";;
+    I) if ! test_option_timing_argument $OPTARG; then
+         echo "Invalid argument: $OPTARG" >&2
+         usage; exit 1
+         fi
+       keygen_command+=" -I $OPTARG";;
+    D) if ! test_option_timing_argument $OPTARG; then
+         echo "Invalid argument: $OPTARG" >&2
+         usage; exit 1
+         fi
+       keygen_command+=" -D $OPTARG";;
+    d) option_dryrun=1;;
+    h) usage; exit;;
+    \?) echo "Invalid option: -$OPTARG" >&2
+        usage; exit 1;;
+    esac;
+  done
+
+# check key size
+if [[ "$algorithm" == "DSA" && "$keysize" == "2048" ]]; then
+  echo "Maximum key size for DSA is 1024" >&2
+  usage; exit 1
+  fi
+
+# collect zones
+if [[ -n $option_zonefiles ]]; then
+
+  #search zone directory
+  zones=`ls $zonedir/$zonefiles_prefix*$zonefiles_suffix | xargs -n1 basename | \
+      sed -e "s/^.\{${#zonefiles_prefix}\}\(.*\).\{${#zonefiles_suffix}\}$/\1/"`
+  set -- $zones
+  if [[ $# -eq 0 ]]; then
+    echo "No zones found in directory $zonedir" >&2
+    usage; exit 1
+    fi;
+
+else
+
+  # process operands
+  shift $((OPTIND-1))
+  [[ "$1" = "--" ]] && shift
+  zones="$@"
+  if [[ $# -eq 0 ]]; then
+    echo "No zones found in operands" >&2
+    usage; exit 1
+    fi;
+
+  fi
+
+# add remaining options
+if [[ -n $option_ksk ]]; then
+  keygen_command+=" $options_ksk";
+  keysize="$keysize_ksk"
+else
+  if [[ -n $options_zsk ]]; then
+    keygen_command+=" $options_zsk"
+    fi
+  keysize="$keysize_zsk"
+  fi
+if [[ -n $option_keysize ]]; then
+  keysize="$option_keysize"
+  fi
+keygen_command+=" -a $algorithm -b $keysize -r $random_generator -K $keydir"
+
+# check file system
+if [[ ! -n $option_dryrun ]]; then
+
+  # check keygen executable
+  if [[ ! -x "$keygen_executable" ]]; then
+    echo "Keygen executable not available: $keygen_executable" >&2
+    usage; exit 1
+    fi
+
+  # check random device
+  if [[ ! -r "$random_generator" ]]; then
+    echo "Random device not available: $random_generator" >&2
+    usage; exit 1
+    fi
+
+  # create and test key directory
+  mkdir -p "$keydir" 2>/dev/null
+  touch $keydir/gp-genkeys.touch && rm -f $keydir/gp-genkeys.touch || \
+      (echo "Key directory not writable: $keydir" >&2; usage; exit 1)
+
+  fi
+
+# generate key pairs
+for zone in $zones; do
+  if [[ -n $option_dryrun ]]; then
+    echo "$keygen_command $zone"
+    continue
+    fi
+  eval "$keygen_command $zone"
+done
