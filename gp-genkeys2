@@ -5,7 +5,7 @@
 
 # Copyright (C) 2012-  Adrian Offerman <http://www.offerman.com/>
 # This program is published under the GNU General Public License version 3;
-# read the files COPYRIGHT, LICENSE, and COPYING for details
+# read the files LICENSE and COPYING for details
 
 zonedir="/var/named/chroot/var/named"
 zonefiles_prefix="db."
