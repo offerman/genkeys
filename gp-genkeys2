@@ -1,4 +1,12 @@
 #!/bin/bash
+
+# gp-genkeys2: Generate, update, and prepublish ZSK and KSK key pairs for
+#              DNSSEC deployment.
+
+# Copyright (C) 2012-  Adrian Offerman <http://www.offerman.com/>
+# This program is published under the GNU General Public License version 3;
+# read the files COPYRIGHT, LICENSE, and COPYING for details
+
 zonedir="/var/named/chroot/var/named"
 zonefiles_prefix="db."
 zonefiles_suffix=""
